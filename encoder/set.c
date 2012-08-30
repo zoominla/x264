@@ -568,15 +568,19 @@ int x264_sei_version_write( x264_t *h, bs_t *s )
     char *opts = x264_param2string( &h->param, 0 );
     char *payload;
     int length;
+	const char *version_str = X264_VERSION;
+	if(h->param.i_verinfo_type == 1) {
+		if(h->param.psz_custom_data && *(h->param.psz_custom_data)) version_str = h->param.psz_custom_data;
+	}
 
     if( !opts )
         return -1;
     CHECKED_MALLOC( payload, 200 + strlen( opts ) );
 
     memcpy( payload, uuid, 16 );
-    sprintf( payload+16, "x264 - core %d%s - H.264/MPEG-4 AVC codec - "
-             "Copy%s 2003-2012 - http://www.videolan.org/x264.html - options: %s",
-             X264_BUILD, X264_VERSION, HAVE_GPL?"left":"right", opts );
+    sprintf( payload+16, "x264(%s)-core %d%s - H.264/MPEG-4 - "
+             "Copy%s 2003-2012 - options: %s",
+             version_str, X264_BUILD, X264_VERSION, HAVE_GPL?"left":"right", opts );
     length = strlen(payload)+1;
 
     x264_sei_write( s, (uint8_t *)payload, length, SEI_USER_DATA_UNREGISTERED );

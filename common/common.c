@@ -162,6 +162,7 @@ void x264_param_default( x264_param_t *param )
     memset( param->cqm_8ic, 16, sizeof( param->cqm_8ic ) );
     memset( param->cqm_8pc, 16, sizeof( param->cqm_8pc ) );
 
+    param->i_verinfo_type = 0;
     param->b_repeat_headers = 1;
     param->b_annexb = 1;
     param->b_aud = 0;
@@ -1029,6 +1030,12 @@ int x264_param_parse( x264_param_t *p, const char *name, const char *value )
         p->b_fake_interlaced = atobool(value);
     OPT("frame-packing")
         p->i_frame_packing = atoi(value);
+    OPT("versioninfo")
+        p->i_verinfo_type = atoi(value);
+    OPT("user-data")
+	strncpy(p->psz_custom_data, value, 64);
+    OPT("psnr-file")
+        strncpy(p->psz_psnr_file, value, 256);
     else
         return X264_PARAM_BAD_NAME;
 #undef OPT
@@ -1260,6 +1267,109 @@ error:
     return NULL;
 }
 
+static char index2Char(int nIndex)
+{
+    char ch;
+    nIndex %= 64;                   
+
+    if (nIndex < 26)                
+    {
+        ch = (char)('Z' - nIndex);
+    }
+    else if (nIndex < 52)            
+    {
+        ch = (char)('a' + nIndex - 26);
+    }
+    else if (nIndex < 62)            
+    {
+        ch = (char)('0' + nIndex - 52);
+    }
+    else if (nIndex == 62)           
+    {
+        ch = '_';
+    }
+    else if (nIndex == 63)            
+    {
+        ch = '/';
+    }
+    else
+    {
+        ch = 'A';
+    }
+
+    return ch;
+}
+
+
+static void ToBase64(const char* instr, int len, char* outstr)
+{
+    int i, j;
+    unsigned char ch1, ch2, ch3;
+
+    i = 0;
+    j = 0;
+    while (i + 2 < len)
+    {
+        ch1 = (unsigned char)instr[i];
+        ch2 = (unsigned char)instr[i + 1];
+        ch3 = (unsigned char)instr[i + 2];
+
+        outstr[j] = index2Char(ch1 >> 2);
+        outstr[j + 1] = index2Char(((ch1 & 0x3) << 4) | (ch2 >> 4));
+        outstr[j + 2] = index2Char(((ch2 & 0x0f) << 2) | (ch3 >> 6));
+        outstr[j + 3] = index2Char(ch3 & 0x3f);
+
+        i += 3;
+        j += 4;
+    }
+    outstr[j] = '\0';
+}
+
+
+static char EncryptChar(char c)
+{
+    char x = 0;
+
+    x += (c & 0x80);
+    x += (c & 0x40);
+    x += (c & 0x20) >> 1;
+    x += (c & 0x10) << 1;
+    x += (c & 0x08) >> 1;
+    x += (c & 0x04) << 1;
+    x += (c & 0x02) >> 1;
+    x += (c & 0x01) << 1;
+
+    return x;
+}
+
+char* Base64EncodeString(const char* originStr)
+{
+	size_t originLen = strlen(originStr);
+	size_t dstLen = (originLen+2)/3*4;
+	size_t tmpLen = (originLen+2)/3 * 3;
+	char* dstBuf = (char*)x264_malloc(dstLen+1);
+	char* tmpStr = (char*)malloc(tmpLen+1);
+	int i=0;
+	memset(dstBuf, 0, dstLen+1);
+	for( ;i<originLen; ++i) {
+		tmpStr[i] = EncryptChar(originStr[i]);
+	}
+	
+	if(originLen%3 == 2) {			// Need to pad 1 letter
+		ToBase64(tmpStr, tmpLen, dstBuf);
+		dstBuf[dstLen-1] = '=';
+	} else if(originLen%3 == 1) {	// Need to pad 2 letter
+		ToBase64(tmpStr, tmpLen, dstBuf);
+		dstBuf[dstLen-2] = '=';
+		dstBuf[dstLen-1] = '=';
+	} else {
+		ToBase64(tmpStr, tmpLen, dstBuf);
+	}
+	
+	free(tmpStr);
+	return dstBuf;
+}
+
 /****************************************************************************
  * x264_param2string:
  ****************************************************************************/
@@ -1267,6 +1377,7 @@ char *x264_param2string( x264_param_t *p, int b_res )
 {
     int len = 1000;
     char *buf, *s;
+	int encrypt_info = 0;
     if( p->rc.psz_zones )
         len += strlen(p->rc.psz_zones);
     buf = s = x264_malloc( len );
@@ -1279,7 +1390,9 @@ char *x264_param2string( x264_param_t *p, int b_res )
         s += sprintf( s, "fps=%u/%u ", p->i_fps_num, p->i_fps_den );
         s += sprintf( s, "timebase=%u/%u ", p->i_timebase_num, p->i_timebase_den );
         s += sprintf( s, "bitdepth=%d ", BIT_DEPTH );
-    }
+    } else if (p->i_verinfo_type == 1) {
+		encrypt_info = 1;
+	}
 
     s += sprintf( s, "cabac=%d", p->b_cabac );
     s += sprintf( s, " ref=%d", p->i_frame_reference );
@@ -1383,6 +1496,11 @@ char *x264_param2string( x264_param_t *p, int b_res )
             s += sprintf( s, " zones" );
     }
 
+	if(encrypt_info) {
+		char* encryptstr = Base64EncodeString(buf);
+		x264_free(buf);
+		return encryptstr;
+	}
     return buf;
 }
 

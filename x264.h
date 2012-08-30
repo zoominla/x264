@@ -308,7 +308,11 @@ typedef struct x264_param_t
     int         i_bframe_pyramid;   /* Keep some B-frames as references: 0=off, 1=strict hierarchical, 2=normal */
     int         b_open_gop;
     int         b_bluray_compat;
-
+    int         i_verinfo_type;     /* Write version infomation into bitstream */
+    int         b_timed_scenecut;   /* Use PTS based scenecut threshold increment instead of frame count */
+    char	psz_custom_data[64];	/*Custom data write to SEI header*/
+    char        psz_psnr_file[256];	/*File path to record PSNR and SSIM*/
+    
     int         b_deblocking_filter;
     int         i_deblocking_filter_alphac0;    /* [-6, 6] -6 light filter, 6 strong */
     int         i_deblocking_filter_beta;       /* [-6, 6]  idem */

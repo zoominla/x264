@@ -1609,11 +1609,13 @@ int x264_encoder_headers( x264_t *h, x264_nal_t **pp_nal, int *pi_nal )
         return -1;
 
     /* identify ourselves */
-    x264_nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
-    if( x264_sei_version_write( h, &h->out.bs ) )
-        return -1;
-    if( x264_nal_end( h ) )
-        return -1;
+    if(h->param.i_verinfo_type > 0) {
+        x264_nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
+        if( x264_sei_version_write( h, &h->out.bs ) )
+            return -1;
+        if( x264_nal_end( h ) )
+            return -1;
+    }
 
     frame_size = x264_encoder_encapsulate_nals( h, 0 );
     if( frame_size < 0 )
@@ -3107,7 +3109,7 @@ int     x264_encoder_encode( x264_t *h,
 
     if( h->fenc->b_keyframe )
     {
-        if( h->param.b_repeat_headers && h->fenc->i_frame == 0 )
+        if( h->param.b_repeat_headers && h->fenc->i_frame == 0 && h->param.i_verinfo_type > 0)
         {
             /* identify ourself */
             x264_nal_start( h, NAL_SEI, NAL_PRIORITY_DISPOSABLE );
@@ -3750,10 +3752,18 @@ void    x264_encoder_close  ( x264_t *h )
                 x264_log( h, X264_LOG_INFO, "ref %c L%d:%s\n", "PB"[i_slice], i_list, buf );
             }
 
+        // Output psnr and ssim
+        FILE* psnrFp = NULL;
+        if(*(h->param.psz_psnr_file)) {
+            psnrFp = fopen(h->param.psz_psnr_file, "wt");
+        }
         if( h->param.analyse.b_ssim )
         {
             float ssim = SUM3( h->stat.f_ssim_mean_y ) / duration;
             x264_log( h, X264_LOG_INFO, "SSIM Mean Y:%.7f (%6.3fdb)\n", ssim, x264_ssim( ssim ) );
+            if(psnrFp) {
+                fprintf(psnrFp, "SSIM Mean Y:%.7f (%6.3fdb)\n", ssim, x264_ssim( ssim ) );
+            }
         }
         if( h->param.analyse.b_psnr )
         {
@@ -3765,9 +3775,43 @@ void    x264_encoder_close  ( x264_t *h )
                       SUM3( h->stat.f_psnr_average ) / duration,
                       x264_psnr( SUM3( h->stat.f_ssd_global ), duration * i_yuv_size ),
                       f_bitrate );
+            if(psnrFp) {
+                fprintf(psnrFp,
+                      "PSNR Mean Y:%6.3f U:%6.3f V:%6.3f Avg:%6.3f Global:%6.3f kb/s:%.2f\n",
+                      SUM3( h->stat.f_psnr_mean_y ) / duration,
+                      SUM3( h->stat.f_psnr_mean_u ) / duration,
+                      SUM3( h->stat.f_psnr_mean_v ) / duration,
+                      SUM3( h->stat.f_psnr_average ) / duration,
+                      x264_psnr( SUM3( h->stat.f_ssd_global ), duration * i_yuv_size ),
+                      f_bitrate );
+            }
         }
         else
             x264_log( h, X264_LOG_INFO, "kb/s:%.2f\n", f_bitrate );
+            
+        if(psnrFp) {
+			// Output I P B average Qp
+			int isliceCount = h->stat.i_frame_count[SLICE_TYPE_I];
+			int psliceCount = h->stat.i_frame_count[SLICE_TYPE_P];
+			int bsliceCount = h->stat.i_frame_count[SLICE_TYPE_B];
+			int totalCount = isliceCount+psliceCount+bsliceCount;
+			if(isliceCount > 0) {
+				fprintf(psnrFp, "QP Value: IQP:%1.2f, ", h->stat.f_frame_qp[SLICE_TYPE_I]/isliceCount);
+			}
+			if(psliceCount > 0) {
+				fprintf(psnrFp, "PQP:%1.2f, ", h->stat.f_frame_qp[SLICE_TYPE_P]/psliceCount);
+			}
+			if(bsliceCount > 0) {
+				fprintf(psnrFp, "BQP:%1.2f, ", h->stat.f_frame_qp[SLICE_TYPE_B]/bsliceCount);
+			}
+            if(totalCount > 0) {
+				fprintf(psnrFp, "Average QP:%1.2f\n", h->stat.f_frame_qp[SLICE_TYPE_I]/totalCount + 
+					h->stat.f_frame_qp[SLICE_TYPE_P]/totalCount + h->stat.f_frame_qp[SLICE_TYPE_B]/totalCount);
+            }
+			fprintf(psnrFp, "Slice count: I:%d, P:%d, B:%d, Total:%d\n", isliceCount, psliceCount,
+				bsliceCount, totalCount);
+            fclose(psnrFp);
+        }
     }
 
     /* rc */
