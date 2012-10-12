@@ -172,6 +172,7 @@ void x264_param_default( x264_param_t *param )
     param->b_pic_struct = 0;
     param->b_fake_interlaced = 0;
     param->i_frame_packing = -1;
+    param->f_complexRatio = 0.f;
 }
 
 static int x264_param_apply_preset( x264_param_t *param, const char *preset )
