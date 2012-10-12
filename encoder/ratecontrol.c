@@ -1834,6 +1834,41 @@ static double get_qscale(x264_t *h, ratecontrol_entry_t *rce, double rate_factor
     return q;
 }
 
+static double get_qscale2(x264_t *h, ratecontrol_entry_t *rce, double rate_factor, int frame_num)
+{
+    x264_ratecontrol_t *rcc= h->rc;
+    x264_zone_t *zone = get_zone( h, frame_num );
+    double q;
+    /*if( h->param.rc.b_mb_tree )
+    {
+        double timescale = (double)h->sps->vui.i_num_units_in_tick / h->sps->vui.i_time_scale;
+        q = pow( BASE_FRAME_DURATION / CLIP_DURATION(rce->i_duration * timescale), 1 - h->param.rc.f_qcompress );
+    }
+    else
+        q = pow( rce->blurred_complexity, 1 - rcc->qcompress );*/
+    q = pow( rce->blurred_complexity, 0.42 ); 
+
+    // avoid NaN's in the rc_eq
+    if( !isfinite(q) || rce->tex_bits + rce->mv_bits == 0 )
+        q = rcc->last_qscale_for[rce->pict_type];
+    else
+    {
+        rcc->last_rceq = q;
+        q /= rate_factor;
+        rcc->last_qscale = q;
+    }
+
+    if( zone )
+    {
+        if( zone->b_force_qp )
+            q = qp2qscale( zone->i_qp );
+        else
+            q /= zone->f_bitrate_factor;
+    }
+
+    return q;
+}
+
 static double get_diff_limited_q(x264_t *h, ratecontrol_entry_t *rce, double q, int frame_num)
 {
     x264_ratecontrol_t *rcc = h->rc;
@@ -2274,7 +2309,10 @@ static float rate_estimate_qscale( x264_t *h )
 
             diff = predicted_bits - (int64_t)rce.expected_bits;
             q = rce.new_qscale;
-            q /= x264_clip3f((double)(abr_buffer - diff) / abr_buffer, .5, 2);
+            // Defualt complex ratio, equal to 0
+            if(h->param.f_complexRatio > -0.01 && h->param.f_complexRatio < 0.01) {
+                q /= x264_clip3f((double)(abr_buffer - diff) / abr_buffer, .5, 2);
+            }
             if( ((h->i_frame + 1 - h->i_thread_frames) >= rcc->fps) &&
                 (rcc->expected_bits_sum > 0))
             {
@@ -2282,7 +2320,9 @@ static float rate_estimate_qscale( x264_t *h )
                  * achieved and expected bitrate so far */
                 double cur_time = (double)h->i_frame / rcc->num_entries;
                 double w = x264_clip3f( cur_time*100, 0.0, 1.0 );
-                q *= pow( (double)total_bits / rcc->expected_bits_sum, w );
+                if(h->param.f_complexRatio > -0.01 && h->param.f_complexRatio < 0.01) {
+                   q *= pow( (double)total_bits / rcc->expected_bits_sum, w );
+                }
             }
             if( rcc->b_vbv )
             {
@@ -2694,6 +2734,9 @@ static int init_pass2( x264_t *h )
         duration += rcc->entry[i].i_duration;
     duration *= timescale;
     uint64_t all_available_bits = h->param.rc.i_bitrate * 1000. * duration;
+    if(h->param.f_complexRatio > 0) {
+        all_available_bits = (uint64_t)(all_available_bits*h->param.f_complexRatio);
+    }
     double rate_factor, step_mult;
     double qblur = h->param.rc.f_qblur;
     double cplxblur = h->param.rc.f_complexity_blur;
@@ -2794,7 +2837,11 @@ static int init_pass2( x264_t *h )
         /* find qscale */
         for( int i = 0; i < rcc->num_entries; i++ )
         {
-            qscale[i] = get_qscale( h, &rcc->entry[i], rate_factor, -1 );
+            if(h->param.f_complexRatio > 0) {
+                qscale[i] = get_qscale2( h, &rcc->entry[i], rate_factor, -1 );
+            } else {
+                qscale[i] = get_qscale( h, &rcc->entry[i], rate_factor, -1 );
+            }
             rcc->last_qscale_for[rcc->entry[i].pict_type] = qscale[i];
         }
 
@@ -2839,8 +2886,18 @@ static int init_pass2( x264_t *h )
             expected_bits += qscale2bits( rce, rce->new_qscale );
         }
 
-        if( expected_bits > all_available_bits )
-            rate_factor -= step;
+        if(h->param.f_complexRatio > 0) {
+            double avgq = 0;
+            for( int i = 0; i < rcc->num_entries; i++ )
+            avgq += rcc->entry[i].new_qscale;
+            avgq = qscale2qp( avgq / rcc->num_entries );
+            fprintf(stderr, "Ratio:%f    target Qp:%f    Average Qp:%f\n", h->param.f_complexRatio, h->param.f_targetQp, avgq);
+            if( (expected_bits > all_available_bits) || (avgq<h->param.f_targetQp))
+                rate_factor -= step;
+        } else {
+            if(expected_bits > all_available_bits)
+                rate_factor -= step;
+        }
     }
 
     x264_free( qscale );
