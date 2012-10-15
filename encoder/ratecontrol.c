@@ -2309,8 +2309,8 @@ static float rate_estimate_qscale( x264_t *h )
 
             diff = predicted_bits - (int64_t)rce.expected_bits;
             q = rce.new_qscale;
-            // Defualt complex ratio, equal to 0
-            if(h->param.f_complexRatio > -0.01 && h->param.f_complexRatio < 0.01) {
+            // Defualt f_targetQp, equal to 0
+            if(h->param.f_targetQp > -0.01 && h->param.f_targetQp < 0.01) {
                 q /= x264_clip3f((double)(abr_buffer - diff) / abr_buffer, .5, 2);
             }
             if( ((h->i_frame + 1 - h->i_thread_frames) >= rcc->fps) &&
@@ -2320,7 +2320,7 @@ static float rate_estimate_qscale( x264_t *h )
                  * achieved and expected bitrate so far */
                 double cur_time = (double)h->i_frame / rcc->num_entries;
                 double w = x264_clip3f( cur_time*100, 0.0, 1.0 );
-                if(h->param.f_complexRatio > -0.01 && h->param.f_complexRatio < 0.01) {
+                if(h->param.f_targetQp > -0.01 && h->param.f_targetQp < 0.01) {
                    q *= pow( (double)total_bits / rcc->expected_bits_sum, w );
                 }
             }
@@ -2734,9 +2734,7 @@ static int init_pass2( x264_t *h )
         duration += rcc->entry[i].i_duration;
     duration *= timescale;
     uint64_t all_available_bits = h->param.rc.i_bitrate * 1000. * duration;
-    if(h->param.f_complexRatio > 0) {
-        all_available_bits = (uint64_t)(all_available_bits*h->param.f_complexRatio);
-    }
+   
     double rate_factor, step_mult;
     double qblur = h->param.rc.f_qblur;
     double cplxblur = h->param.rc.f_complexity_blur;
@@ -2744,14 +2742,43 @@ static int init_pass2( x264_t *h )
     double expected_bits;
     double *qscale, *blurred_qscale;
     double base_cplx = h->mb.i_mb_count * (h->param.i_bframe ? 120 : 80);
-
+    float pass1_final_qp[4] = {0.f};    // I/P/B/Avg  Qp
+    FILE* psnrFp = NULL;
+    
     /* find total/average complexity & const_bits */
+    float avgp_1pass = 0;
     for( int i = 0; i < rcc->num_entries; i++ )
     {
         ratecontrol_entry_t *rce = &rcc->entry[i];
         all_const_bits += rce->misc_bits;
+        avgp_1pass += qscale2qp(rce->qscale);
     }
-
+    avgp_1pass /= rcc->num_entries;
+    
+    /*Read pass 1 final Qp values from psnr file*/
+    if(*(h->param.psz_psnr_file)) {
+        psnrFp = fopen(h->param.psz_psnr_file, "r");
+    }
+    if(psnrFp) {
+        char qpContent[1024] = {0};
+        const char* qptype[4] = {"IQP:", "PQP:", "BQP:", "Average QP:"};
+        char* tmp = NULL;
+        fread(qpContent, 1, 1024, psnrFp);
+        fclose(psnrFp);
+        
+        // Read I/P/B/Avg Qp from file content
+        for(int idx = 0; idx < 4; ++idx) {
+            tmp = strstr(qpContent, qptype[idx]);
+            if(tmp) {
+                tmp += strlen(qptype[idx]);
+                pass1_final_qp[idx] = atof(tmp);
+            }
+        }
+    }
+    
+    x264_log( h, X264_LOG_ERROR, "Pass 1 IQp:%f, PQp:%f, BQp:%f, AvgQp:%f\n", pass1_final_qp[0],
+             pass1_final_qp[1], pass1_final_qp[2], pass1_final_qp[3]);
+    
     if( all_available_bits < all_const_bits)
     {
         x264_log( h, X264_LOG_ERROR, "requested bitrate is too low. estimated minimum is %d kbps\n",
@@ -2837,7 +2864,7 @@ static int init_pass2( x264_t *h )
         /* find qscale */
         for( int i = 0; i < rcc->num_entries; i++ )
         {
-            if(h->param.f_complexRatio > 0) {
+            if(h->param.f_targetQp > 0) {
                 qscale[i] = get_qscale2( h, &rcc->entry[i], rate_factor, -1 );
             } else {
                 qscale[i] = get_qscale( h, &rcc->entry[i], rate_factor, -1 );
@@ -2886,12 +2913,12 @@ static int init_pass2( x264_t *h )
             expected_bits += qscale2bits( rce, rce->new_qscale );
         }
 
-        if(h->param.f_complexRatio > 0) {
+        if(h->param.f_targetQp > 0) {
             double avgq = 0;
             for( int i = 0; i < rcc->num_entries; i++ )
             avgq += rcc->entry[i].new_qscale;
             avgq = qscale2qp( avgq / rcc->num_entries );
-            fprintf(stderr, "Ratio:%f    target Qp:%f    Average Qp:%f\n", h->param.f_complexRatio, h->param.f_targetQp, avgq);
+            //fprintf(stderr, "Ratio:%f    target Qp:%f    Average Qp:%f\n", h->param.f_complexRatio, h->param.f_targetQp, avgq);
             if( (expected_bits > all_available_bits) || (avgq<h->param.f_targetQp))
                 rate_factor -= step;
         } else {
@@ -2904,9 +2931,12 @@ static int init_pass2( x264_t *h )
     if( filter_size > 1 )
         x264_free( blurred_qscale );
 
-    if( rcc->b_vbv )
-        if( vbv_pass2( h, all_available_bits ) )
-            return -1;
+    if(h->param.f_targetQp > -0.01 && h->param.f_targetQp < 0.01) {
+        if( rcc->b_vbv )
+            if( vbv_pass2( h, all_available_bits ) )
+                return -1;
+    }
+    
     expected_bits = count_expected_bits( h );
 
     if( fabs( expected_bits/all_available_bits - 1.0 ) > 0.01 )

@@ -312,7 +312,7 @@ typedef struct x264_param_t
     int         b_timed_scenecut;   /* Use PTS based scenecut threshold increment instead of frame count */
     char	psz_custom_data[64];	/*Custom data write to SEI header*/
     char        psz_psnr_file[256];	/*File path to record PSNR and SSIM*/
-    float       f_complexRatio;         /*Complexity ratio for pass 2(reduce bitrate)*/
+
     float       f_targetQp;             /*Target Qp of pass-2*/
     
     int         b_deblocking_filter;
