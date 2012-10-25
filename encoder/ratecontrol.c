@@ -1335,14 +1335,19 @@ void x264_ratecontrol_start( x264_t *h, int i_force_qp, int overhead )
     if( i_force_qp != X264_QP_AUTO )
         q = i_force_qp - 1;
 
+	
     q = x264_clip3f( q, h->param.rc.i_qp_min, h->param.rc.i_qp_max );
+	
 
+	
     rc->qpa_rc = rc->qpa_rc_prev =
     rc->qpa_aq = rc->qpa_aq_prev = 0;
     rc->qp = x264_clip3( q + 0.5f, 0, QP_MAX );
     h->fdec->f_qp_avg_rc =
     h->fdec->f_qp_avg_aq =
     rc->qpm = q;
+	
+
     if( rce )
         rce->new_qp = rc->qp;
 
@@ -1563,7 +1568,8 @@ int x264_ratecontrol_mb_qp( x264_t *h )
         /* Scale AQ's effect towards zero in emergency mode. */
         if( qp > QP_MAX_SPEC )
             qp_offset *= (QP_MAX - qp) / (QP_MAX - QP_MAX_SPEC);
-        qp += qp_offset;
+
+		qp += qp_offset;
     }
     return x264_clip3( qp + 0.5f, h->param.rc.i_qp_min, h->param.rc.i_qp_max );
 }
@@ -1847,10 +1853,10 @@ static double get_qscale2(x264_t *h, ratecontrol_entry_t *rce, double rate_facto
     else
         q = pow( rce->blurred_complexity, 1 - rcc->qcompress );*/
     q = pow( rce->blurred_complexity, 0.42 ); 
-
+	//q = pow( rce->blurred_complexity, 0);
     // avoid NaN's in the rc_eq
     if( !isfinite(q) || rce->tex_bits + rce->mv_bits == 0 )
-        q = rcc->last_qscale_for[rce->pict_type];
+   		q = rcc->last_qscale_for[rce->pict_type];
     else
     {
         rcc->last_rceq = q;
@@ -2747,14 +2753,64 @@ static int init_pass2( x264_t *h )
     
     /* find total/average complexity & const_bits */
     float avgp_1pass = 0;
+    float avgb_1pass = 0;
+    float avgi_1pass = 0;
+    float avg_1pass = 0;
+    float avg_ref_1pass = 0;
+    int count_p = 0;
+    int count_b = 0;
+    int count_i = 0;
+    int count_ref = 0;
     for( int i = 0; i < rcc->num_entries; i++ )
     {
         ratecontrol_entry_t *rce = &rcc->entry[i];
         all_const_bits += rce->misc_bits;
-        avgp_1pass += qscale2qp(rce->qscale);
+		if (rce->pict_type == SLICE_TYPE_P)
+		{
+			avgp_1pass += qscale2qp(rce->qscale);
+			count_p++;
+		}
+		else if (rce->pict_type == SLICE_TYPE_I)
+		{
+			avgi_1pass += qscale2qp(rce->qscale);
+			count_i++;
+		}
+		else if (rce->pict_type == SLICE_TYPE_B)
+		{
+			avgb_1pass += qscale2qp(rce->qscale);
+			count_b++;
+		}
+
+		if (rce->kept_as_ref == 1)
+		{
+			avg_ref_1pass += qscale2qp(rce->qscale);
+			count_ref++;
+		}
+			
+		avg_1pass += qscale2qp(rce->qscale);
     }
-    avgp_1pass /= rcc->num_entries;
-    
+	if (count_p>0)
+    	avgp_1pass /= count_p;
+	else 
+		avgp_1pass = 26.0; 
+
+	if (count_b>0)
+		avgb_1pass /= count_b;
+	else 
+		avgb_1pass = 26.0;
+
+	if (count_i>0)
+		avgi_1pass /= count_i;
+	else
+		avgi_1pass = 26.0;
+
+	if (count_ref>0)
+		avg_ref_1pass /= count_ref;
+	else
+		avg_ref_1pass =26.0;
+	
+	avg_1pass /= rcc->num_entries;
+
     /*Read pass 1 final Qp values from psnr file*/
     if(*(h->param.psz_psnr_file)) {
         psnrFp = fopen(h->param.psz_psnr_file, "r");
@@ -2775,10 +2831,114 @@ static int init_pass2( x264_t *h )
             }
         }
     }
-    
-    x264_log( h, X264_LOG_ERROR, "Pass 1 IQp:%f, PQp:%f, BQp:%f, AvgQp:%f\n", pass1_final_qp[0],
-             pass1_final_qp[1], pass1_final_qp[2], pass1_final_qp[3]);
-    
+
+	float target_QP_final;
+	float target_qp;
+	float prev_avg_ref_qp;
+
+	int count_ref_b = count_ref-count_i-count_p;
+	if (count_ref_b<0)
+		count_ref_b = 0;
+	if (count_i+count_p+count_ref_b==0)
+		prev_avg_ref_qp =26.0;
+	else
+		prev_avg_ref_qp = (float)(pass1_final_qp[0]*count_i
+			               		 +pass1_final_qp[1]*count_p
+			               		 +pass1_final_qp[2]*count_ref_b)/(count_i+count_p+count_ref_b);  
+	
+	if (h->param.f_targetQp > 0)
+	{
+		target_qp = X264_MAX(pass1_final_qp[1],pass1_final_qp[3]);
+		//target_qp = prev_avg_ref_qp;
+		//target_qp = X264_MAX(avgp_1pass, avg_1pass);
+
+		
+			
+		
+		float qp_offset = 2;
+		if (target_qp<26.0)
+			target_qp += qp_offset;
+		else if ((target_qp>=26)&&(target_qp<=31))
+		{
+			float a,b;
+			a = 0.2*(0.2-qp_offset);
+			b = 0.2-a*31;
+			float delta_qp = a*target_qp + b;
+			//float delta_qp = 6.2*qp_offset - qp_offset*0.2*target_qp;
+			//float delta_qp = 12.4-0.4*target_qp;
+			target_qp += delta_qp;
+		}
+		else if (target_qp>31)
+		{
+			target_qp += 0.2;
+			
+		}
+		else{}
+				
+		if (target_qp > 35)
+			target_qp = prev_avg_ref_qp;
+		else if (target_qp < 22)
+			target_qp = 22;
+
+
+
+		/*float	delta_qp_tmp = (float)((avgi_1pass - pass1_final_qp[0])*count_i
+			               		+(avgp_1pass - pass1_final_qp[1])*count_p
+			               		+(avgb_1pass - pass1_final_qp[2])*count_b)/rcc->num_entries;*/
+
+		//target_QP_final  = (avgp_1pass - pass1_final_qp[1])*0.95 + target_qp;
+		//51+QP_BD_OFFSET
+		
+		//float	delta_qp_tmp = (float)(avgp_1pass - pass1_final_qp[1])*(51+QP_BD_OFFSET-qp2)/(51+QP_BD_OFFSET-qp1);
+
+		float	delta_qp_tmp =  avgp_1pass - pass1_final_qp[1];
+		target_QP_final  =  target_qp+  x264_clip3(delta_qp_tmp,0, QP_MAX );
+		//target_QP_final = x264_clip3( target_QP_final+0.5, 0, QP_MAX );
+		//target_QP_final  = (avgp_1pass - pass1_final_qp[1])*0.95 + target_qp;
+
+		//float	delta_qp_tmp =  0.0;
+		//target_QP_final = target_qp;
+		/*x264_log(h, X264_LOG_ERROR, "target_qp:%f, delta_qp_tmp:%f, target_QP_final:%f\n", 
+		   							target_qp, delta_qp_tmp, target_QP_final);
+
+		if(*(h->param.psz_psnr_file)) {
+                    psnrFp = fopen(h->param.psz_psnr_file, "at");
+                }
+
+		if(psnrFp) {
+                        fprintf(psnrFp, "Pass 1 after:  IQp:%f, PQp:%f, BQp:%f, AvgQp:%f\n", pass1_final_qp[0],
+             		pass1_final_qp[1], pass1_final_qp[2], pass1_final_qp[3]); 
+
+			fprintf(psnrFp, "Pass 1 before: IQp:%f, PQp:%f, BQp:%f, AvgQp:%f\n", avgi_1pass,
+				    avgp_1pass, avgb_1pass, avg_1pass);
+
+			fprintf(psnrFp, "Frame count:   IQp:%d, PQp:%d, BQp:%d, AvgQp:%d, ref:%f\n", count_i,
+				    count_p, count_b, rcc->num_entries, count_ref);
+
+			fprintf(psnrFp, "Frame count:   IQp:%d, PQp:%d, B_ref:%d\n", count_i,
+				    count_p, (count_ref-count_i-count_p));
+			
+			fprintf(psnrFp, "target_qp:%f,  delta_qp_tmp:%f, target_QP_final:%f\n\n", 
+		   			target_qp,  delta_qp_tmp, target_QP_final);
+                }     
+
+		if(psnrFp)
+		{
+			fclose(psnrFp);
+			psnrFp = NULL;
+		}*/
+		//float fps = (float) h->param.i_fps_num / h->param.i_fps_den;
+		//float bpp =  (h->param.rc.i_bitrate*1000)/(h->param.i_width*h->param.i_height*fps);
+
+		//if (bpp > 0.0676786*0.9)
+			//target_QP_final += 0.5; 
+		//else if (bpp < 0.0375*1.05)
+			//target_QP_final -= 0.5;
+		//x264_log(h, X264_LOG_ERROR, "bitrate:%d, width:%d, height:%d, fps:%f, bpp:%f\n", 
+		    //h->param.rc.i_bitrate, h->param.i_width, h->param.i_height, fps, bpp);
+	}
+
+	
     if( all_available_bits < all_const_bits)
     {
         x264_log( h, X264_LOG_ERROR, "requested bitrate is too low. estimated minimum is %d kbps\n",
@@ -2864,11 +3024,7 @@ static int init_pass2( x264_t *h )
         /* find qscale */
         for( int i = 0; i < rcc->num_entries; i++ )
         {
-            if(h->param.f_targetQp > 0) {
-                qscale[i] = get_qscale2( h, &rcc->entry[i], rate_factor, -1 );
-            } else {
-                qscale[i] = get_qscale( h, &rcc->entry[i], rate_factor, -1 );
-            }
+            qscale[i] = get_qscale( h, &rcc->entry[i], rate_factor, -1 );
             rcc->last_qscale_for[rcc->entry[i].pict_type] = qscale[i];
         }
 
@@ -2914,12 +3070,28 @@ static int init_pass2( x264_t *h )
         }
 
         if(h->param.f_targetQp > 0) {
-            double avgq = 0;
-            for( int i = 0; i < rcc->num_entries; i++ )
-            avgq += rcc->entry[i].new_qscale;
-            avgq = qscale2qp( avgq / rcc->num_entries );
-            //fprintf(stderr, "Ratio:%f    target Qp:%f    Average Qp:%f\n", h->param.f_complexRatio, h->param.f_targetQp, avgq);
-            if( (expected_bits > all_available_bits) || (avgq<h->param.f_targetQp))
+            double avg_p_q = 0;
+			int count_p0 =0;
+			for( int i = 0; i < rcc->num_entries; i++ )
+            {
+            	ratecontrol_entry_t *rce = &rcc->entry[i];
+				if (rce->pict_type == SLICE_TYPE_P)
+				//if (rce->kept_as_ref)
+				{
+					avg_p_q += qscale2qp(rce->new_qscale);
+					count_p0++;
+				}
+			}
+			if (count_p0>0)
+            	avg_p_q = avg_p_q/ count_p0;
+			else 
+				avg_p_q = 26.0;
+			x264_log(h, X264_LOG_ERROR,"target Qp:%f    Average Qp:%f\n", target_QP_final, avg_p_q);
+            //if( (expected_bits > all_available_bits) || (avg_p_q<target_QP_final))
+                //rate_factor -= step;
+            if (fabs(avg_p_q-target_QP_final)<0.01)
+				break;
+            if (avg_p_q<target_QP_final)
                 rate_factor -= step;
         } else {
             if(expected_bits > all_available_bits)
