@@ -3086,7 +3086,7 @@ static int init_pass2( x264_t *h )
             	avg_p_q = avg_p_q/ count_p0;
 			else 
 				avg_p_q = 26.0;
-			x264_log(h, X264_LOG_ERROR,"target Qp:%f    Average Qp:%f\n", target_QP_final, avg_p_q);
+			//x264_log(h, X264_LOG_ERROR,"target Qp:%f    Average Qp:%f\n", target_QP_final, avg_p_q);
             //if( (expected_bits > all_available_bits) || (avg_p_q<target_QP_final))
                 //rate_factor -= step;
             if (fabs(avg_p_q-target_QP_final)<0.01)
