@@ -2851,8 +2851,15 @@ static inline void x264_mb_analyse_transform( x264_t *h )
 
 static inline void x264_mb_analyse_transform_rd( x264_t *h, x264_mb_analysis_t *a, int *i_satd, int *i_rd )
 {
-    if( x264_mb_transform_8x8_allowed( h ) && h->param.analyse.b_transform_8x8 )
+    if( h->param.analyse.b_transform_8x8 && h->pps->b_transform_8x8_mode )
     {
+        uint32_t subpart_bak = M32( h->mb.i_sub_partition );
+        /* Try switching the subpartitions to 8x8 so that we can use 8x8 transform mode */
+        if( h->mb.i_type == P_8x8 )
+            M32( h->mb.i_sub_partition ) = D_L0_8x8*0x01010101;
+        else if( !x264_transform_allowed[h->mb.i_type] )
+            return;
+
         x264_analyse_update_cache( h, a );
         h->mb.b_transform_8x8 ^= 1;
         /* FIXME only luma is needed for 4:2:0, but the score for comparison already includes chroma */
@@ -2865,7 +2872,10 @@ static inline void x264_mb_analyse_transform_rd( x264_t *h, x264_mb_analysis_t *
             *i_rd = i_rd8;
         }
         else
+        {
             h->mb.b_transform_8x8 ^= 1;
+            M32( h->mb.i_sub_partition ) = subpart_bak;
+        }
     }
 }
 
@@ -2912,7 +2922,7 @@ static inline void x264_mb_analyse_qp_rd( x264_t *h, x264_mb_analysis_t *a )
         {
             if( !origcbp )
             {
-                h->mb.i_qp = X264_MAX( h->mb.i_qp - threshold - 1, h->param.rc.i_qp_min );
+                h->mb.i_qp = X264_MAX( h->mb.i_qp - threshold - 1, SPEC_QP( h->param.rc.i_qp_min ) );
                 h->mb.i_chroma_qp = h->chroma_qp_table[h->mb.i_qp];
                 already_checked_cost = x264_rd_cost_mb( h, a->i_lambda2 );
                 if( !h->mb.cbp[h->mb.i_mb_xy] )
@@ -3037,32 +3047,49 @@ intra_analysis:
         else
         {
             /* Special fast-skip logic using information from mb_info. */
-            if( h->fenc->mb_info && !SLICE_MBAFF && (h->fenc->mb_info[h->mb.i_mb_xy]&X264_MBINFO_CONSTANT) &&
-                !M32(h->mb.cache.pskip_mv) && (h->fenc->i_frame - h->fref[0][0]->i_frame) == 1 && !h->sh.b_weighted_pred &&
-                h->fref[0][0]->effective_qp[h->mb.i_mb_xy] <= h->mb.i_qp )
+            if( h->fdec->mb_info && (h->fdec->mb_info[h->mb.i_mb_xy]&X264_MBINFO_CONSTANT) )
             {
-                b_skip = 1;
-            }
-            else
-            {
-                int skip_invalid = h->i_thread_frames > 1 && h->mb.cache.pskip_mv[1] > h->mb.mv_max_spel[1];
-                /* If the current macroblock is off the frame, just skip it. */
-                if( HAVE_INTERLACED && !MB_INTERLACED && h->mb.i_mb_y * 16 >= h->param.i_height && !skip_invalid )
-                    b_skip = 1;
-                /* Fast P_SKIP detection */
-                else if( h->param.analyse.b_fast_pskip )
+                if( !SLICE_MBAFF && (h->fdec->i_frame - h->fref[0][0]->i_frame) == 1 && !h->sh.b_weighted_pred &&
+                    h->fref[0][0]->effective_qp[h->mb.i_mb_xy] <= h->mb.i_qp )
                 {
-                    if( skip_invalid )
-                        // FIXME don't need to check this if the reference frame is done
-                        {}
-                    else if( h->param.analyse.i_subpel_refine >= 3 )
-                        analysis.b_try_skip = 1;
-                    else if( h->mb.i_mb_type_left[0] == P_SKIP ||
-                             h->mb.i_mb_type_top == P_SKIP ||
-                             h->mb.i_mb_type_topleft == P_SKIP ||
-                             h->mb.i_mb_type_topright == P_SKIP )
-                        b_skip = x264_macroblock_probe_pskip( h );
+                    h->mb.i_partition = D_16x16;
+                    /* Use the P-SKIP MV if we can... */
+                    if( !M32(h->mb.cache.pskip_mv) )
+                    {
+                        b_skip = 1;
+                        h->mb.i_type = P_SKIP;
+                    }
+                    /* Otherwise, just force a 16x16 block. */
+                    else
+                    {
+                        h->mb.i_type = P_L0;
+                        analysis.l0.me16x16.i_ref = 0;
+                        M32( analysis.l0.me16x16.mv ) = 0;
+                    }
+                    goto skip_analysis;
                 }
+                /* Reset the information accordingly */
+                else if( h->param.analyse.b_mb_info_update )
+                    h->fdec->mb_info[h->mb.i_mb_xy] &= ~X264_MBINFO_CONSTANT;
+            }
+
+            int skip_invalid = h->i_thread_frames > 1 && h->mb.cache.pskip_mv[1] > h->mb.mv_max_spel[1];
+            /* If the current macroblock is off the frame, just skip it. */
+            if( HAVE_INTERLACED && !MB_INTERLACED && h->mb.i_mb_y * 16 >= h->param.i_height && !skip_invalid )
+                b_skip = 1;
+            /* Fast P_SKIP detection */
+            else if( h->param.analyse.b_fast_pskip )
+            {
+                if( skip_invalid )
+                    // FIXME don't need to check this if the reference frame is done
+                    {}
+                else if( h->param.analyse.i_subpel_refine >= 3 )
+                    analysis.b_try_skip = 1;
+                else if( h->mb.i_mb_type_left[0] == P_SKIP ||
+                         h->mb.i_mb_type_top == P_SKIP ||
+                         h->mb.i_mb_type_topleft == P_SKIP ||
+                         h->mb.i_mb_type_topright == P_SKIP )
+                    b_skip = x264_macroblock_probe_pskip( h );
             }
         }
 
@@ -3073,6 +3100,7 @@ intra_analysis:
             h->mb.i_type = P_SKIP;
             h->mb.i_partition = D_16x16;
             assert( h->mb.cache.pskip_mv[1] <= h->mb.mv_max_spel[1] || h->i_thread_frames == 1 );
+skip_analysis:
             /* Set up MVs for future predictors */
             for( int i = 0; i < h->mb.pic.i_fref[0]; i++ )
                 M32( h->mb.mvr[0][i][h->mb.i_mb_xy] ) = 0;

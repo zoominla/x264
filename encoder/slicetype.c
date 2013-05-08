@@ -1124,6 +1124,7 @@ static void x264_macroblock_tree( x264_t *h, x264_mb_analysis_t *a, x264_frame_t
 
     if( !h->param.rc.i_lookahead )
     {
+        x264_slicetype_frame_cost( h, a, frames, 0, last_nonb, last_nonb, 0 );
         x264_macroblock_tree_propagate( h, frames, average_duration, 0, last_nonb, last_nonb, 1 );
         XCHG( uint16_t*, frames[last_nonb]->i_propagate_cost, frames[0]->i_propagate_cost );
     }
@@ -1650,7 +1651,10 @@ void x264_slicetype_decide( x264_t *h )
             if( warn && h->param.b_open_gop )
                 warn &= frm->i_type != X264_TYPE_I;
             if( warn )
+            {
                 x264_log( h, X264_LOG_WARNING, "specified frame type (%d) at %d is not compatible with keyframe interval\n", frm->i_type, frm->i_frame );
+                frm->i_type = h->param.b_open_gop && h->lookahead->i_last_keyframe >= 0 ? X264_TYPE_I : X264_TYPE_IDR;
+            }
         }
         if( frm->i_type == X264_TYPE_I && frm->i_frame - h->lookahead->i_last_keyframe >= h->param.i_keyint_min )
         {
